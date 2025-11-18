@@ -8,6 +8,22 @@ import {
   useNavigate,
 } from "react-router-dom";
 import { createClient } from "@supabase/supabase-js";
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ResponsiveContainer,
+  PieChart,
+  Pie,
+  Cell,
+  LineChart,
+  Line,
+} from "recharts";
+
 
 // --- Brand palette (hex) ---
 const palette = {
@@ -522,9 +538,6 @@ const Records = () => {
             Registros individuales
           </h2>
         </div>
-        <p style={{ color: palette.citrineBrown }}>
-          Seleccioná un perro para ver sus detalles.
-        </p>
 
         {loading && (
           <p style={{ color: palette.citrineBrown }}>Cargando perros…</p>
@@ -588,23 +601,162 @@ const Records = () => {
   );
 };
 
+// --- Helpers estadísticos para el detalle del perro ---
+
+// ¿Es una sesión exitosa?
+const isSuccessResult = (result) =>
+  String(result || "").toLowerCase() === "success";
+
+// Extrae un valor numérico de conditions[key]
+const getConditionValue = (session, key) => {
+  const cond = session.conditions || {};
+  let v = cond?.[key];
+  if (typeof v === "string") v = parseFloat(v);
+  return Number.isFinite(v) ? v : null;
+};
+
+// Calcula media, mediana y moda para un array de números
+const computeNumericStats = (values) => {
+  if (!values || values.length === 0) return null;
+
+  const sorted = [...values].sort((a, b) => a - b);
+  const n = sorted.length;
+  const sum = sorted.reduce((acc, v) => acc + v, 0);
+  const mean = sum / n;
+
+  let median;
+  if (n % 2 === 1) {
+    median = sorted[(n - 1) / 2];
+  } else {
+    median = (sorted[n / 2 - 1] + sorted[n / 2]) / 2;
+  }
+
+  const freq = new Map();
+  let mode = sorted[0];
+  let bestCount = 0;
+  sorted.forEach((v) => {
+    const c = (freq.get(v) || 0) + 1;
+    freq.set(v, c);
+    if (c > bestCount) {
+      bestCount = c;
+      mode = v;
+    }
+  });
+
+  return { mean, median, mode };
+};
+
+// Construye distribuciones (bins) y stats para una condición concreta
+const buildConditionDistributions = (
+  successSessions,
+  failSessions,
+  key,
+  binCount = 6
+) => {
+  const successVals = successSessions
+    .map((s) => getConditionValue(s, key))
+    .filter((v) => v !== null);
+  const failVals = failSessions
+    .map((s) => getConditionValue(s, key))
+    .filter((v) => v !== null);
+
+  const allVals = [...successVals, ...failVals];
+  if (allVals.length === 0) {
+    return {
+      binsSuccess: [],
+      binsFail: [],
+      statsSuccess: null,
+      statsFail: null,
+    };
+  }
+
+  const min = Math.min(...allVals);
+  const max = Math.max(...allVals);
+
+  const effectiveBinCount = min === max ? 1 : binCount;
+  const step =
+    effectiveBinCount === 1 ? 1 : (max - min) / effectiveBinCount || 1;
+
+  const bins = Array.from({ length: effectiveBinCount }, (_, i) => ({
+    start: min + i * step,
+    end:
+      i === effectiveBinCount - 1 ? max : min + (i + 1) * step,
+    success: 0,
+    fail: 0,
+  }));
+
+  const getIndex = (v) => {
+    if (effectiveBinCount === 1) return 0;
+    const idx = Math.floor((v - min) / step);
+    return Math.max(0, Math.min(effectiveBinCount - 1, idx));
+  };
+
+  successVals.forEach((v) => {
+    const idx = getIndex(v);
+    bins[idx].success += 1;
+  });
+
+  failVals.forEach((v) => {
+    const idx = getIndex(v);
+    bins[idx].fail += 1;
+  });
+
+  const formatLabel = (b) => {
+    if (effectiveBinCount === 1) return b.start.toFixed(1);
+    return `${b.start.toFixed(1)}–${b.end.toFixed(1)}`;
+  };
+
+  const binsSuccess = bins.map((b) => ({
+    range: formatLabel(b),
+    count: b.success,
+  }));
+
+  const binsFail = bins.map((b) => ({
+    range: formatLabel(b),
+    count: b.fail,
+  }));
+
+  return {
+    binsSuccess,
+    binsFail,
+    statsSuccess: computeNumericStats(successVals),
+    statsFail: computeNumericStats(failVals),
+  };
+};
+
+
 /**
  * RecordDetail: detalle de un perro.
  */
 const RecordDetail = () => {
-  const { id } = useParams();
+  const { id } = useParams(); // id del perro (dogs.id)
   const navigate = useNavigate();
 
   const [dog, setDog] = React.useState(null);
+  const [sessions, setSessions] = React.useState([]);
   const [loading, setLoading] = React.useState(!!supabase);
   const [error, setError] = React.useState(null);
+  const [selectedCondition, setSelectedCondition] =
+    React.useState("temp");
+
+  // Opciones de condiciones para el desplegable
+  const conditionOptions = [
+    { key: "temp", label: "Temperatura" },
+    { key: "wind", label: "Viento" },
+    { key: "press", label: "Presión" },
+    { key: "hum", label: "Humedad" },
+  ];
 
   React.useEffect(() => {
+    // Si hay Supabase: traemos perro + sesiones reales
     if (supabase) {
       (async () => {
         try {
           setLoading(true);
-          const { data, error } = await supabase
+          setError(null);
+
+          // Datos del perro
+          const { data: dogData, error: dogError } = await supabase
             .from("dogs")
             .select(
               "id, dog_code, name, breed, sex, birthdate, notes, active, created_at"
@@ -612,16 +764,34 @@ const RecordDetail = () => {
             .eq("id", id)
             .single();
 
-          if (error) throw error;
-          setDog(data);
+          if (dogError) throw dogError;
+
+          // Sesiones de entrenamiento de este perro
+          const { data: sessData, error: sessError } = await supabase
+            .from("training_sessions")
+            .select(
+              "id, result, started_at, duration_s, conditions"
+            )
+            .eq("dog_id", id)
+            .order("started_at", { ascending: true });
+
+          if (sessError) throw sessError;
+
+          setDog(dogData);
+          setSessions(sessData || []);
         } catch (err) {
           console.error(err);
-          setError(err.message || "Error al cargar el perro desde Supabase");
+          setError(
+            err.message ||
+              "Error al cargar el perro / sus sesiones desde Supabase"
+          );
         } finally {
           setLoading(false);
         }
       })();
     } else {
+      // Fallback sin Supabase: solo usamos MOCK_ENTRIES para mostrar algo
+      setLoading(false);
       const entry = MOCK_ENTRIES.find((e) => e.id === id);
       if (entry) {
         setDog({
@@ -635,14 +805,63 @@ const RecordDetail = () => {
           active: true,
           created_at: entry.fecha,
         });
+        setSessions([]); // no hay datos de sesiones reales
       }
-      setLoading(false);
     }
   }, [id]);
 
+  // Derivados: partición de sesiones
+  const successSessions = sessions.filter((s) =>
+    isSuccessResult(s.result)
+  );
+  const failSessions = sessions.filter(
+    (s) => !isSuccessResult(s.result)
+  );
+  const totalSessions = sessions.length;
+
+  const successRate = totalSessions
+    ? (successSessions.length / totalSessions) * 100
+    : 0;
+  const failRate = totalSessions ? 100 - successRate : 0;
+
+  const rateHistogramData = [
+    {
+      label: "Éxitos",
+      rate: Math.round(successRate),
+    },
+    {
+      label: "Falsos positivos",
+      rate: Math.round(failRate),
+    },
+  ];
+
+  // Distribuciones por condición seleccionada
+  const {
+    binsSuccess,
+    binsFail,
+    statsSuccess,
+    statsFail,
+  } = React.useMemo(
+    () =>
+      buildConditionDistributions(
+        successSessions,
+        failSessions,
+        selectedCondition
+      ),
+    [successSessions, failSessions, selectedCondition]
+  );
+
+  // Serie temporal de duración
+  const durationSeries = sessions.map((s) => ({
+    date: s.started_at
+      ? String(s.started_at).slice(0, 10)
+      : "Sin fecha",
+    duration: s.duration_s || 0,
+  }));
+
   return (
     <Shell>
-      <section className="space-y-6">
+      <section className="space-y-8">
         <div className="flex items-center gap-3">
           <Button variant="ghost" onClick={() => navigate(-1)}>
             ← Volver
@@ -651,83 +870,282 @@ const RecordDetail = () => {
             className="text-3xl font-bold"
             style={{ color: palette.policeBlue }}
           >
-            Registro
+            {dog ? dog.name : "Perro"}
           </h2>
         </div>
 
         {loading && (
           <p style={{ color: palette.citrineBrown }}>Cargando…</p>
         )}
-        {error && <p style={{ color: "crimson" }}>Error: {error}</p>}
+        {error && (
+          <p style={{ color: "crimson" }}>Error: {error}</p>
+        )}
 
         {dog ? (
-          <div className="grid gap-6 md:grid-cols-2">
-            <div
-              className="rounded-2xl p-5 shadow-md"
-              style={{
-                background: palette.pearl,
-                border: `2px solid ${palette.buff}`,
-              }}
-            >
+          <>
+            {/* Información básica + notas */}
+            <div className="space-y-6">
+              <div
+                className="rounded-2xl p-5 shadow-md"
+                style={{
+                  background: palette.pearl,
+                  border: `2px solid ${palette.buff}`,
+                }}
+              >
+                <h3
+                  className="text-xl font-semibold mb-3"
+                  style={{ color: palette.policeBlue }}
+                >
+                  Información básica
+                </h3>
+                <dl className="space-y-2">
+                  <div className="flex justify-between">
+                    <dt className="font-medium">Nombre</dt>
+                    <dd>{dog.name}</dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="font-medium">Código</dt>
+                    <dd>{dog.dog_code || "—"}</dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="font-medium">Raza</dt>
+                    <dd>{dog.breed || "—"}</dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="font-medium">Sexo</dt>
+                    <dd>{dog.sex || "—"}</dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="font-medium">Nacimiento</dt>
+                    <dd>{dog.birthdate || "—"}</dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="font-medium">Activo</dt>
+                    <dd>{dog.active ? "Sí" : "No"}</dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="font-medium">Registrado</dt>
+                    <dd>
+                      {dog.created_at
+                        ? String(dog.created_at).slice(0, 10)
+                        : "—"}
+                    </dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="font-medium">
+                      Sesiones registradas
+                    </dt>
+                    <dd>{totalSessions}</dd>
+                  </div>
+                </dl>
+              </div>
+
+              <div
+                className="rounded-2xl p-5 shadow-md"
+                style={{
+                  background: palette.pearl,
+                  border: `2px solid ${palette.buff}`,
+                }}
+              >
+                <h3
+                  className="text-xl font-semibold mb-3"
+                  style={{ color: palette.policeBlue }}
+                >
+                  Notas
+                </h3>
+                <p style={{ color: palette.citrineBrown }}>
+                  {dog.notes || "Sin notas"}
+                </p>
+              </div>
+            </div>
+
+            {/* Histograma simple de tasas de éxito / fallo */}
+            <section className="space-y-4">
               <h3
-                className="text-xl font-semibold mb-3"
+                className="text-xl font-semibold"
                 style={{ color: palette.policeBlue }}
               >
-                Información básica
+                Tasas de entrenamientos exitosos y falsos positivos
               </h3>
-              <dl className="space-y-2">
-                <div className="flex justify-between">
-                  <dt className="font-medium">Nombre</dt>
-                  <dd>{dog.name}</dd>
+
+              {totalSessions === 0 ? (
+                <p style={{ color: palette.citrineBrown }}>
+                  Todavía no hay sesiones registradas para este
+                  perro.
+                </p>
+              ) : (
+                <div className="h-64">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart
+                      data={rateHistogramData}
+                      margin={{
+                        top: 10,
+                        right: 30,
+                        left: 0,
+                        bottom: 20,
+                      }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="label" />
+                      <YAxis unit="%" />
+                      <Tooltip />
+                      <Bar
+                        dataKey="rate"
+                        name="Tasa (%)"
+                        fill={palette.marigold}
+                      />
+                    </BarChart>
+                  </ResponsiveContainer>
                 </div>
-                <div className="flex justify-between">
-                  <dt className="font-medium">Código</dt>
-                  <dd>{dog.dog_code || "—"}</dd>
-                </div>
-                <div className="flex justify-between">
-                  <dt className="font-medium">Raza</dt>
-                  <dd>{dog.breed || "—"}</dd>
-                </div>
-                <div className="flex justify-between">
-                  <dt className="font-medium">Sexo</dt>
-                  <dd>{dog.sex || "—"}</dd>
-                </div>
-                <div className="flex justify-between">
-                  <dt className="font-medium">Nacimiento</dt>
-                  <dd>{dog.birthdate || "—"}</dd>
-                </div>
-                <div className="flex justify-between">
-                  <dt className="font-medium">Activo</dt>
-                  <dd>{dog.active ? "Sí" : "No"}</dd>
-                </div>
-                <div className="flex justify-between">
-                  <dt className="font-medium">Registrado</dt>
-                  <dd>
-                    {dog.created_at
-                      ? String(dog.created_at).slice(0, 10)
-                      : "—"}
-                  </dd>
-                </div>
-              </dl>
-            </div>
-            <div
-              className="rounded-2xl p-5 shadow-md"
-              style={{
-                background: palette.pearl,
-                border: `2px solid ${palette.buff}`,
-              }}
-            >
+              )}
+            </section>
+
+            {/* Distribuciones por condición */}
+            <section className="space-y-4">
               <h3
-                className="text-xl font-semibold mb-3"
+                className="text-xl font-semibold"
                 style={{ color: palette.policeBlue }}
               >
-                Notas
+                Distribución de condiciones ambientales
               </h3>
-              <p style={{ color: palette.citrineBrown }}>
-                {dog.notes || "Sin notas"}
-              </p>
-            </div>
-          </div>
+
+              <div className="flex flex-wrap items-center gap-3">
+                <span
+                  className="font-medium"
+                  style={{ color: palette.policeBlue }}
+                >
+                  Condición:
+                </span>
+                <select
+                  value={selectedCondition}
+                  onChange={(e) =>
+                    setSelectedCondition(e.target.value)
+                  }
+                  className="rounded-xl px-3 py-2 border bg-white"
+                >
+                  {conditionOptions.map((opt) => (
+                    <option key={opt.key} value={opt.key}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {binsSuccess.length === 0 &&
+              binsFail.length === 0 ? (
+                <p style={{ color: palette.citrineBrown }}>
+                  No hay datos numéricos para esta condición en las
+                  sesiones de este perro.
+                </p>
+              ) : (
+                <div className="grid md:grid-cols-2 gap-6">
+                  {/* Éxitos */}
+                  <div
+                    className="rounded-2xl p-4 shadow-md"
+                    style={{
+                      background: palette.pearl,
+                      border: `2px solid ${palette.buff}`,
+                    }}
+                  >
+                    <h4
+                      className="font-semibold mb-2"
+                      style={{ color: palette.policeBlue }}
+                    >
+                      Entrenamientos exitosos
+                    </h4>
+                    <div className="h-56 mb-2">
+                      <ResponsiveContainer
+                        width="100%"
+                        height="100%"
+                      >
+                        <BarChart data={binsSuccess}>
+                          <CartesianGrid strokeDasharray="3 3" />
+                          <XAxis dataKey="range" />
+                          <YAxis />
+                          <Tooltip />
+                          <Bar
+                            dataKey="count"
+                            name="Frecuencia"
+                            fill={palette.marigold}
+                          />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                    <StatsSummary stats={statsSuccess} />
+                  </div>
+
+                  {/* Fallos */}
+                  <div
+                    className="rounded-2xl p-4 shadow-md"
+                    style={{
+                      background: palette.pearl,
+                      border: `2px solid ${palette.buff}`,
+                    }}
+                  >
+                    <h4
+                      className="font-semibold mb-2"
+                      style={{ color: palette.policeBlue }}
+                    >
+                      Falsos positivos
+                    </h4>
+                    <div className="h-56 mb-2">
+                      <ResponsiveContainer
+                        width="100%"
+                        height="100%"
+                      >
+                        <BarChart data={binsFail}>
+                          <CartesianGrid strokeDasharray="3 3" />
+                          <XAxis dataKey="range" />
+                          <YAxis />
+                          <Tooltip />
+                          <Bar
+                            dataKey="count"
+                            name="Frecuencia"
+                            fill={palette.citrineBrown}
+                          />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                    <StatsSummary stats={statsFail} />
+                  </div>
+                </div>
+              )}
+            </section>
+
+            {/* Serie temporal de duración */}
+            <section className="space-y-4">
+              <h3
+                className="text-xl font-semibold"
+                style={{ color: palette.policeBlue }}
+              >
+                Evolución temporal de la duración de las sesiones
+              </h3>
+
+              {durationSeries.length === 0 ? (
+                <p style={{ color: palette.citrineBrown }}>
+                  No hay datos de duración para las sesiones.
+                </p>
+              ) : (
+                <div className="h-72">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={durationSeries}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="date" />
+                      <YAxis />
+                      <Tooltip />
+                      <Line
+                        type="monotone"
+                        dataKey="duration"
+                        name="Duración (s)"
+                        stroke={palette.policeBlue}
+                        strokeWidth={2}
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </section>
+          </>
         ) : (
           !loading &&
           !error && (
@@ -741,11 +1159,235 @@ const RecordDetail = () => {
   );
 };
 
+
 const Stats = () => {
   const navigate = useNavigate();
+  const [loading, setLoading] = React.useState(!!supabase);
+  const [error, setError] = React.useState(null);
+
+  const [globalKpis, setGlobalKpis] = React.useState(null);
+  const [perDogStats, setPerDogStats] = React.useState([]);
+  const [scentStats, setScentStats] = React.useState([]);
+  const [tempBuckets, setTempBuckets] = React.useState([]);
+  const [humBuckets, setHumBuckets] = React.useState([]);
+
+  // Colores para gráficas (usa tu paleta)
+  const chartColors = {
+    success: palette.marigold,
+    fail: palette.citrineBrown,
+    barOutline: palette.policeBlue,
+    scent1: palette.marigold,
+    scent2: palette.policeBlue,
+    scent3: palette.citrineBrown,
+  };
+
+  React.useEffect(() => {
+    if (!supabase) {
+      setLoading(false);
+      setError(
+        "Supabase no está configurado correctamente. No se pueden mostrar estadísticas."
+      );
+      return;
+    }
+
+    (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+
+        // Traemos todas las sesiones con info del perro
+        const { data, error } = await supabase
+          .from("training_sessions")
+          .select(
+            `
+            id,
+            dog_id,
+            result,
+            started_at,
+            duration_s,
+            conditions,
+            type,
+            dogs (
+              id,
+              name,
+              dog_code
+            )
+          `
+          );
+
+        if (error) throw error;
+        const sessions = data || [];
+        processSessions(sessions);
+      } catch (err) {
+        console.error(err);
+        setError(err.message || "Error al cargar las estadísticas.");
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
+
+  const processSessions = (sessions) => {
+    if (!sessions.length) {
+      setGlobalKpis({
+        totalSessions: 0,
+        totalDogs: 0,
+        successRate: 0,
+        totalFails: 0,
+      });
+      setPerDogStats([]);
+      setScentStats([]);
+      setTempBuckets([]);
+      setHumBuckets([]);
+      return;
+    }
+
+    const perDogMap = new Map();
+    const scentMap = new Map();
+    const tempMap = new Map();
+    const humMap = new Map();
+
+    let totalSessions = 0;
+    let totalSuccess = 0;
+    let totalFail = 0;
+
+    const bucketTemp = (t) => {
+      if (t < 5) return "Frío (<5°C)";
+      if (t < 15) return "Fresco (5-15°C)";
+      if (t < 25) return "Templado (15-25°C)";
+      if (t < 35) return "Caluroso (25-35°C)";
+      return "Muy caluroso (≥35°C)";
+    };
+
+    const bucketHum = (h) => {
+      if (h < 40) return "Baja (<40%)";
+      if (h < 70) return "Media (40-70%)";
+      return "Alta (≥70%)";
+    };
+
+    sessions.forEach((s) => {
+      const result = String(s.result || "").toLowerCase();
+      const isSuccess = result === "success"; // todo lo que no sea success lo contamos como fallo
+      const dog = s.dogs;
+      const dogId = dog?.id || s.dog_id;
+      const dogName = dog?.name || "Perro sin nombre";
+      const dogCode = dog?.dog_code || "";
+
+      totalSessions += 1;
+      if (isSuccess) totalSuccess += 1;
+      else totalFail += 1;
+
+      // --- Por perro ---
+      if (!perDogMap.has(dogId)) {
+        perDogMap.set(dogId, {
+          dogId,
+          name: dogName,
+          code: dogCode,
+          total: 0,
+          success: 0,
+          fail: 0,
+        });
+      }
+      const dEntry = perDogMap.get(dogId);
+      dEntry.total += 1;
+      if (isSuccess) dEntry.success += 1;
+      else dEntry.fail += 1;
+
+      // --- Por tipo de olor (scent) ---
+      const typeObj = s.type || {};
+      const scent = String(typeObj.scent || "Desconocido");
+      if (!scentMap.has(scent)) {
+        scentMap.set(scent, {
+          scent,
+          total: 0,
+          success: 0,
+          fail: 0,
+        });
+      }
+      const scentEntry = scentMap.get(scent);
+      scentEntry.total += 1;
+      if (isSuccess) scentEntry.success += 1;
+      else scentEntry.fail += 1;
+
+      // --- Condiciones ambientales ---
+      const cond = s.conditions || {};
+      // Temperatura
+      let temp = cond.temp;
+      if (typeof temp === "string") temp = parseFloat(temp);
+      if (Number.isFinite(temp)) {
+        const bucket = bucketTemp(temp);
+        if (!tempMap.has(bucket)) {
+          tempMap.set(bucket, { bucket, total: 0, success: 0, fail: 0 });
+        }
+        const tEntry = tempMap.get(bucket);
+        tEntry.total += 1;
+        if (isSuccess) tEntry.success += 1;
+        else tEntry.fail += 1;
+      }
+      // Humedad
+      let hum = cond.hum;
+      if (typeof hum === "string") hum = parseFloat(hum);
+      if (Number.isFinite(hum)) {
+        const bucket = bucketHum(hum);
+        if (!humMap.has(bucket)) {
+          humMap.set(bucket, { bucket, total: 0, success: 0, fail: 0 });
+        }
+        const hEntry = humMap.get(bucket);
+        hEntry.total += 1;
+        if (isSuccess) hEntry.success += 1;
+        else hEntry.fail += 1;
+      }
+    });
+
+    // KPIs globales
+    setGlobalKpis({
+      totalSessions,
+      totalDogs: perDogMap.size,
+      successRate: totalSessions
+        ? Math.round((totalSuccess / totalSessions) * 100)
+        : 0,
+      totalFails: totalFail,
+    });
+
+    // Por perro
+    const perDogArr = Array.from(perDogMap.values())
+      .map((d) => ({
+        ...d,
+        successRate: d.total ? Math.round((d.success / d.total) * 100) : 0,
+      }))
+      // ordenamos por cantidad de sesiones
+      .sort((a, b) => b.total - a.total);
+    setPerDogStats(perDogArr);
+
+    // Por olor
+    const scentArr = Array.from(scentMap.values()).map((s) => ({
+      ...s,
+      successRate: s.total ? Math.round((s.success / s.total) * 100) : 0,
+    }));
+    setScentStats(scentArr);
+
+    // Buckets de temperatura
+    const tempArr = Array.from(tempMap.values()).map((t) => ({
+      ...t,
+      successRate: t.total ? Math.round((t.success / t.total) * 100) : 0,
+    }));
+    setTempBuckets(
+      tempArr.sort((a, b) => a.bucket.localeCompare(b.bucket, "es"))
+    );
+
+    // Buckets de humedad
+    const humArr = Array.from(humMap.values()).map((h) => ({
+      ...h,
+      successRate: h.total ? Math.round((h.success / h.total) * 100) : 0,
+    }));
+    setHumBuckets(
+      humArr.sort((a, b) => a.bucket.localeCompare(b.bucket, "es"))
+    );
+  };
+
   return (
     <Shell>
-      <section className="space-y-6">
+      <section className="space-y-8">
         <div className="flex items-center gap-3">
           <Button variant="ghost" onClick={() => navigate(-1)}>
             ← Volver
@@ -757,27 +1399,232 @@ const Stats = () => {
             Estadísticas generales
           </h2>
         </div>
-        <p style={{ color: palette.citrineBrown }}>
-          Esta página presentará un resumen estadístico de todos los registros.
-          Por ahora es un placeholder con navegación lista.
-        </p>
-        <div
-          className="rounded-2xl p-6 shadow-md"
-          style={{
-            background: palette.pearl,
-            border: `2px solid ${palette.buff}`,
-          }}
-        >
-          <ul className="list-disc pl-6">
-            <li>Conteos totales</li>
-            <li>Distribuciones por perro / fecha</li>
-            <li>Gráficos (cuando conectemos Supabase)</li>
-          </ul>
-        </div>
+
+        {loading && (
+          <p style={{ color: palette.citrineBrown }}>Cargando estadísticas…</p>
+        )}
+        {error && <p style={{ color: "crimson" }}>Error: {error}</p>}
+
+        {!loading && !error && globalKpis && (
+          <>
+            {/* KPIs globales */}
+            <section className="grid md:grid-cols-4 gap-4">
+              <KpiCard
+                label="Sesiones totales"
+                value={globalKpis.totalSessions}
+              />
+              <KpiCard label="Perros con registros" value={globalKpis.totalDogs} />
+              <KpiCard
+                label="Tasa de éxito global"
+                value={`${globalKpis.successRate}%`}
+              />
+              <KpiCard
+                label="Falsos positivos totales"
+                value={globalKpis.totalFails}
+              />
+            </section>
+
+            {/* Éxitos / fallos por perro */}
+            <section className="space-y-4">
+              <h3
+                className="text-xl font-semibold"
+                style={{ color: palette.policeBlue }}
+              >
+                Rendimiento por perro
+              </h3>
+              <p style={{ color: palette.citrineBrown }}>
+                Cantidad de sesiones exitosas y fallidas por perro. Útil para
+                ver quién genera más falsos positivos.
+              </p>
+              {perDogStats.length === 0 ? (
+                <p style={{ color: palette.citrineBrown }}>
+                  No hay suficientes datos para esta gráfica.
+                </p>
+              ) : (
+                <div className="h-80">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart
+                      data={perDogStats}
+                      margin={{ top: 10, right: 30, left: 0, bottom: 40 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis
+                        dataKey="name"
+                        angle={-20}
+                        textAnchor="end"
+                        height={60}
+                      />
+                      <YAxis />
+                      <Tooltip />
+                      <Legend />
+                      <Bar
+                        dataKey="success"
+                        name="Éxitos"
+                        fill={chartColors.success}
+                      />
+                      <Bar
+                        dataKey="fail"
+                        name="Fallos"
+                        fill={chartColors.fail}
+                      />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </section>
+
+            {/* Distribución por olor */}
+            <section className="space-y-4">
+              <h3
+                className="text-xl font-semibold"
+                style={{ color: palette.policeBlue }}
+              >
+                Rendimiento por tipo de olor
+              </h3>
+              <p style={{ color: palette.citrineBrown }}>
+                Comparación de éxitos y fallos según el tipo de olor
+                entrenado (por ejemplo, narcóticos vs explosivos).
+              </p>
+              {scentStats.length === 0 ? (
+                <p style={{ color: palette.citrineBrown }}>
+                  No hay suficientes datos para esta gráfica.
+                </p>
+              ) : (
+                <div className="h-80">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart
+                      data={scentStats}
+                      margin={{ top: 10, right: 30, left: 0, bottom: 40 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis
+                        dataKey="scent"
+                        angle={-15}
+                        textAnchor="end"
+                        height={60}
+                      />
+                      <YAxis />
+                      <Tooltip />
+                      <Legend />
+                      <Bar
+                        dataKey="success"
+                        name="Éxitos"
+                        fill={chartColors.scent1}
+                      />
+                      <Bar
+                        dataKey="fail"
+                        name="Fallos"
+                        fill={chartColors.scent2}
+                      />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </section>
+
+            {/* Efecto de la temperatura */}
+            <section className="space-y-4">
+              <h3
+                className="text-xl font-semibold"
+                style={{ color: palette.policeBlue }}
+              >
+                Tasa de éxito según temperatura
+              </h3>
+              <p style={{ color: palette.citrineBrown }}>
+                Agrupa las sesiones por rangos de temperatura (según el campo
+                <code> conditions.temp </code>) y muestra la tasa de éxito en
+                cada rango.
+              </p>
+              {tempBuckets.length === 0 ? (
+                <p style={{ color: palette.citrineBrown }}>
+                  No hay datos de temperatura en las sesiones.
+                </p>
+              ) : (
+                <div className="h-80">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={tempBuckets}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="bucket" />
+                      <YAxis unit="%" />
+                      <Tooltip />
+                      <Line
+                        type="monotone"
+                        dataKey="successRate"
+                        name="Tasa de éxito"
+                        stroke={palette.policeBlue}
+                        strokeWidth={2}
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </section>
+
+            {/* Efecto de la humedad */}
+            <section className="space-y-4">
+              <h3
+                className="text-xl font-semibold"
+                style={{ color: palette.policeBlue }}
+              >
+                Tasa de éxito según humedad
+              </h3>
+              <p style={{ color: palette.citrineBrown }}>
+                Agrupa las sesiones por rangos de humedad (según{" "}
+                <code>conditions.hum</code>) y muestra la tasa de éxito en cada
+                rango.
+              </p>
+              {humBuckets.length === 0 ? (
+                <p style={{ color: palette.citrineBrown }}>
+                  No hay datos de humedad en las sesiones.
+                </p>
+              ) : (
+                <div className="h-80">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={humBuckets}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="bucket" />
+                      <YAxis unit="%" />
+                      <Tooltip />
+                      <Line
+                        type="monotone"
+                        dataKey="successRate"
+                        name="Tasa de éxito"
+                        stroke={palette.citrineBrown}
+                        strokeWidth={2}
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </section>
+          </>
+        )}
       </section>
     </Shell>
   );
 };
+
+// Tarjetita simple para los KPIs
+const KpiCard = ({ label, value }) => (
+  <div
+    className="rounded-2xl p-4 shadow-md"
+    style={{ background: palette.pearl, border: `2px solid ${palette.buff}` }}
+  >
+    <div
+      className="text-sm font-medium mb-1"
+      style={{ color: palette.citrineBrown }}
+    >
+      {label}
+    </div>
+    <div
+      className="text-2xl font-bold"
+      style={{ color: palette.policeBlue }}
+    >
+      {value}
+    </div>
+  </div>
+);
+
 
 const NewDog = () => {
   const navigate = useNavigate();
@@ -1035,6 +1882,36 @@ export default function App() {
     </BrowserRouter>
   );
 }
+
+const StatsSummary = ({ stats }) => {
+  if (!stats) {
+    return (
+      <p
+        className="text-sm"
+        style={{ color: palette.citrineBrown }}
+      >
+        No hay suficientes datos para calcular estadísticos.
+      </p>
+    );
+  }
+  const format = (x) =>
+    Number.isFinite(x) ? x.toFixed(2) : "—";
+
+  return (
+    <p
+      className="text-sm"
+      style={{ color: palette.citrineBrown }}
+    >
+      <span className="font-medium">Media:</span>{" "}
+      {format(stats.mean)} ·{" "}
+      <span className="font-medium">Mediana:</span>{" "}
+      {format(stats.median)} ·{" "}
+      <span className="font-medium">Moda:</span>{" "}
+      {format(stats.mode)}
+    </p>
+  );
+};
+
 
 const NotFound = () => (
   <Shell>
