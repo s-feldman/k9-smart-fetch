@@ -23,6 +23,8 @@ import {
   LineChart,
   Line,
 } from "recharts";
+import dogLogo from "./assets/k9-logo.jpg";
+
 
 
 // --- Brand palette (hex) ---
@@ -314,23 +316,29 @@ const Shell = ({ children }) => {
 };
 
 // --- Logo ---
-const Logo = ({ size = 120 }) => (
+const Logo = ({ size = 170 }) => (
   <div
     aria-label="K-9 Smart Fetch logo"
-    className="grid place-items-center rounded-full shadow-xl"
+    className="rounded-full shadow-xl overflow-hidden flex items-center justify-center"
     style={{
       width: size,
       height: size,
-      background: palette.policeBlue,
-      color: "white",
       border: `6px solid ${palette.buff}`,
+      background: "white", 
     }}
   >
-    <span className="font-extrabold" style={{ fontSize: size * 0.35 }}>
-      K9
-    </span>
+    <img
+      src={dogLogo}
+      alt="K-9 Smart Fetch"
+      style={{
+        width: "100%",
+        height: "100%",
+        objectFit: "contain", 
+      }}
+    />
   </div>
 );
+
 
 // --- Página de inicio de sesión ---
 const LoginPage = () => {
@@ -456,8 +464,7 @@ const Home = () => {
           className="max-w-2xl text-lg md:text-xl"
           style={{ color: palette.citrineBrown }}
         >
-          Plataforma para administrar registros de sesiones y visualizar
-          estadísticas generales de entrenamiento.
+          La plataforma para hacer tu entrenamiento inteligente.
         </p>
         <div className="flex flex-col gap-3 mt-4">
           <Button to="/records" variant="primary">
@@ -748,14 +755,13 @@ const RecordDetail = () => {
   ];
 
   React.useEffect(() => {
-    // Si hay Supabase: traemos perro + sesiones reales
+    // Si hay Supabase: 
     if (supabase) {
       (async () => {
         try {
           setLoading(true);
           setError(null);
 
-          // Datos del perro
           const { data: dogData, error: dogError } = await supabase
             .from("dogs")
             .select(
@@ -766,7 +772,6 @@ const RecordDetail = () => {
 
           if (dogError) throw dogError;
 
-          // Sesiones de entrenamiento de este perro
           const { data: sessData, error: sessError } = await supabase
             .from("training_sessions")
             .select(
@@ -790,7 +795,7 @@ const RecordDetail = () => {
         }
       })();
     } else {
-      // Fallback sin Supabase: solo usamos MOCK_ENTRIES para mostrar algo
+      // Fallback sin Supabase: 
       setLoading(false);
       const entry = MOCK_ENTRIES.find((e) => e.id === id);
       if (entry) {
@@ -883,7 +888,7 @@ const RecordDetail = () => {
 
         {dog ? (
           <>
-            {/* Información básica + notas */}
+
             <div className="space-y-6">
               <div
                 className="rounded-2xl p-5 shadow-md"
@@ -959,7 +964,6 @@ const RecordDetail = () => {
               </div>
             </div>
 
-            {/* Histograma simple de tasas de éxito / fallo */}
             <section className="space-y-4">
               <h3
                 className="text-xl font-semibold"
@@ -1168,18 +1172,68 @@ const Stats = () => {
   const [globalKpis, setGlobalKpis] = React.useState(null);
   const [perDogStats, setPerDogStats] = React.useState([]);
   const [scentStats, setScentStats] = React.useState([]);
-  const [tempBuckets, setTempBuckets] = React.useState([]);
-  const [humBuckets, setHumBuckets] = React.useState([]);
+  const [conditionSeries, setConditionSeries] = React.useState({
+    temp: [],
+    hum: [],
+    press: [],
+    wind: [],
+  });
 
-  // Colores para gráficas (usa tu paleta)
+  const [selectedCondition, setSelectedCondition] = React.useState("temp");
+
+  const [dogTableMode, setDogTableMode] =
+    React.useState("absolute"); 
+
   const chartColors = {
     success: palette.marigold,
     fail: palette.citrineBrown,
-    barOutline: palette.policeBlue,
     scent1: palette.marigold,
     scent2: palette.policeBlue,
-    scent3: palette.citrineBrown,
   };
+
+  const conditionOptions = [
+    { key: "temp", label: "Temperatura" },
+    { key: "hum", label: "Humedad" },
+    { key: "press", label: "Presión" },
+    { key: "wind", label: "Viento" },
+  ];
+
+  // --- Derivados para las tablas de ranking por perro ---
+
+  const sortKeySuccess =
+    dogTableMode === "absolute" ? "success" : "successRate";
+  const sortKeyFail =
+    dogTableMode === "absolute" ? "fail" : "failRate";
+
+  const successRanking = React.useMemo(() => {
+    if (!perDogStats.length) return [];
+    return [...perDogStats].sort(
+      (a, b) => b[sortKeySuccess] - a[sortKeySuccess]
+    );
+  }, [perDogStats, sortKeySuccess]);
+
+  const failRanking = React.useMemo(() => {
+    if (!perDogStats.length) return [];
+    return [...perDogStats].sort(
+      (a, b) => b[sortKeyFail] - a[sortKeyFail]
+    );
+  }, [perDogStats, sortKeyFail]);
+
+  const successValuesForStats = successRanking.map((d) =>
+    dogTableMode === "absolute" ? d.success : d.successRate
+  );
+  const failValuesForStats = failRanking.map((d) =>
+    dogTableMode === "absolute" ? d.fail : d.failRate
+  );
+
+  const successStatsGlobal =
+    computeNumericStats(successValuesForStats);
+  const failStatsGlobal = computeNumericStats(failValuesForStats);
+
+  const currentConditionSeries =
+    conditionSeries[selectedCondition] || [];
+
+  // --- Carga de datos desde Supabase ---
 
   React.useEffect(() => {
     if (!supabase) {
@@ -1195,7 +1249,6 @@ const Stats = () => {
         setLoading(true);
         setError(null);
 
-        // Traemos todas las sesiones con info del perro
         const { data, error } = await supabase
           .from("training_sessions")
           .select(
@@ -1220,7 +1273,9 @@ const Stats = () => {
         processSessions(sessions);
       } catch (err) {
         console.error(err);
-        setError(err.message || "Error al cargar las estadísticas.");
+        setError(
+          err.message || "Error al cargar las estadísticas."
+        );
       } finally {
         setLoading(false);
       }
@@ -1237,37 +1292,32 @@ const Stats = () => {
       });
       setPerDogStats([]);
       setScentStats([]);
-      setTempBuckets([]);
-      setHumBuckets([]);
+      setConditionSeries({
+        temp: [],
+        hum: [],
+        press: [],
+        wind: [],
+      });
       return;
     }
 
     const perDogMap = new Map();
     const scentMap = new Map();
-    const tempMap = new Map();
-    const humMap = new Map();
+    const condMaps = {
+      temp: new Map(),
+      hum: new Map(),
+      press: new Map(),
+      wind: new Map(),
+    };
 
     let totalSessions = 0;
     let totalSuccess = 0;
     let totalFail = 0;
 
-    const bucketTemp = (t) => {
-      if (t < 5) return "Frío (<5°C)";
-      if (t < 15) return "Fresco (5-15°C)";
-      if (t < 25) return "Templado (15-25°C)";
-      if (t < 35) return "Caluroso (25-35°C)";
-      return "Muy caluroso (≥35°C)";
-    };
-
-    const bucketHum = (h) => {
-      if (h < 40) return "Baja (<40%)";
-      if (h < 70) return "Media (40-70%)";
-      return "Alta (≥70%)";
-    };
-
     sessions.forEach((s) => {
-      const result = String(s.result || "").toLowerCase();
-      const isSuccess = result === "success"; // todo lo que no sea success lo contamos como fallo
+      const resultStr = String(s.result || "").toLowerCase();
+      const isSuccess = resultStr === "success";
+
       const dog = s.dogs;
       const dogId = dog?.id || s.dog_id;
       const dogName = dog?.name || "Perro sin nombre";
@@ -1277,7 +1327,6 @@ const Stats = () => {
       if (isSuccess) totalSuccess += 1;
       else totalFail += 1;
 
-      // --- Por perro ---
       if (!perDogMap.has(dogId)) {
         perDogMap.set(dogId, {
           dogId,
@@ -1293,7 +1342,6 @@ const Stats = () => {
       if (isSuccess) dEntry.success += 1;
       else dEntry.fail += 1;
 
-      // --- Por tipo de olor (scent) ---
       const typeObj = s.type || {};
       const scent = String(typeObj.scent || "Desconocido");
       if (!scentMap.has(scent)) {
@@ -1309,37 +1357,29 @@ const Stats = () => {
       if (isSuccess) scentEntry.success += 1;
       else scentEntry.fail += 1;
 
-      // --- Condiciones ambientales ---
       const cond = s.conditions || {};
-      // Temperatura
-      let temp = cond.temp;
-      if (typeof temp === "string") temp = parseFloat(temp);
-      if (Number.isFinite(temp)) {
-        const bucket = bucketTemp(temp);
-        if (!tempMap.has(bucket)) {
-          tempMap.set(bucket, { bucket, total: 0, success: 0, fail: 0 });
+      ["temp", "hum", "press", "wind"].forEach((key) => {
+        let v = cond?.[key];
+        if (typeof v === "string") v = parseFloat(v);
+        if (!Number.isFinite(v)) return;
+
+        const map = condMaps[key];
+        let entry = map.get(v);
+        if (!entry) {
+          entry = {
+            value: v,
+            total: 0,
+            success: 0,
+            fail: 0,
+          };
+          map.set(v, entry);
         }
-        const tEntry = tempMap.get(bucket);
-        tEntry.total += 1;
-        if (isSuccess) tEntry.success += 1;
-        else tEntry.fail += 1;
-      }
-      // Humedad
-      let hum = cond.hum;
-      if (typeof hum === "string") hum = parseFloat(hum);
-      if (Number.isFinite(hum)) {
-        const bucket = bucketHum(hum);
-        if (!humMap.has(bucket)) {
-          humMap.set(bucket, { bucket, total: 0, success: 0, fail: 0 });
-        }
-        const hEntry = humMap.get(bucket);
-        hEntry.total += 1;
-        if (isSuccess) hEntry.success += 1;
-        else hEntry.fail += 1;
-      }
+        entry.total += 1;
+        if (isSuccess) entry.success += 1;
+        else entry.fail += 1;
+      });
     });
 
-    // KPIs globales
     setGlobalKpis({
       totalSessions,
       totalDogs: perDogMap.size,
@@ -1349,40 +1389,51 @@ const Stats = () => {
       totalFails: totalFail,
     });
 
-    // Por perro
-    const perDogArr = Array.from(perDogMap.values())
-      .map((d) => ({
-        ...d,
-        successRate: d.total ? Math.round((d.success / d.total) * 100) : 0,
-      }))
-      // ordenamos por cantidad de sesiones
-      .sort((a, b) => b.total - a.total);
+    const perDogArr = Array.from(perDogMap.values()).map(
+      (d) => {
+        const successRate = d.total
+          ? (d.success / d.total) * 100
+          : 0;
+        const failRate = d.total ? (d.fail / d.total) * 100 : 0;
+        return {
+          ...d,
+          successRate,
+          failRate,
+        };
+      }
+    );
     setPerDogStats(perDogArr);
 
-    // Por olor
-    const scentArr = Array.from(scentMap.values()).map((s) => ({
-      ...s,
-      successRate: s.total ? Math.round((s.success / s.total) * 100) : 0,
-    }));
+    const scentArr = Array.from(scentMap.values()).map(
+      (s) => ({
+        ...s,
+        successRate: s.total
+          ? Math.round((s.success / s.total) * 100)
+          : 0,
+      })
+    );
     setScentStats(scentArr);
 
-    // Buckets de temperatura
-    const tempArr = Array.from(tempMap.values()).map((t) => ({
-      ...t,
-      successRate: t.total ? Math.round((t.success / t.total) * 100) : 0,
-    }));
-    setTempBuckets(
-      tempArr.sort((a, b) => a.bucket.localeCompare(b.bucket, "es"))
-    );
+    const buildSeries = (map) => {
+      const arr = Array.from(map.values()).map((e) => ({
+        value: e.value,
+        total: e.total,
+        success: e.success,
+        fail: e.fail,
+        successRate: e.total
+          ? Math.round((e.success / e.total) * 100)
+          : 0,
+      }));
+      arr.sort((a, b) => a.value - b.value);
+      return arr;
+    };
 
-    // Buckets de humedad
-    const humArr = Array.from(humMap.values()).map((h) => ({
-      ...h,
-      successRate: h.total ? Math.round((h.success / h.total) * 100) : 0,
-    }));
-    setHumBuckets(
-      humArr.sort((a, b) => a.bucket.localeCompare(b.bucket, "es"))
-    );
+    setConditionSeries({
+      temp: buildSeries(condMaps.temp),
+      hum: buildSeries(condMaps.hum),
+      press: buildSeries(condMaps.press),
+      wind: buildSeries(condMaps.wind),
+    });
   };
 
   return (
@@ -1401,19 +1452,26 @@ const Stats = () => {
         </div>
 
         {loading && (
-          <p style={{ color: palette.citrineBrown }}>Cargando estadísticas…</p>
+          <p style={{ color: palette.citrineBrown }}>
+            Cargando estadísticas…
+          </p>
         )}
-        {error && <p style={{ color: "crimson" }}>Error: {error}</p>}
+        {error && (
+          <p style={{ color: "crimson" }}>Error: {error}</p>
+        )}
 
         {!loading && !error && globalKpis && (
           <>
             {/* KPIs globales */}
             <section className="grid md:grid-cols-4 gap-4">
               <KpiCard
-                label="Sesiones totales"
+                label="Entrenamientos totales"
                 value={globalKpis.totalSessions}
               />
-              <KpiCard label="Perros con registros" value={globalKpis.totalDogs} />
+              <KpiCard
+                label="Canes con entrenamientos registrados"
+                value={globalKpis.totalDogs}
+              />
               <KpiCard
                 label="Tasa de éxito global"
                 value={`${globalKpis.successRate}%`}
@@ -1424,77 +1482,179 @@ const Stats = () => {
               />
             </section>
 
-            {/* Éxitos / fallos por perro */}
+            {/* Ranking por perro: éxitos / falsos positivos */}
             <section className="space-y-4">
-              <h3
-                className="text-xl font-semibold"
-                style={{ color: palette.policeBlue }}
-              >
-                Rendimiento por perro
-              </h3>
-              <p style={{ color: palette.citrineBrown }}>
-                Cantidad de sesiones exitosas y fallidas por perro. Útil para
-                ver quién genera más falsos positivos.
-              </p>
+              <div className="flex flex-wrap items-center gap-3 justify-between">
+                <h3
+                  className="text-xl font-semibold"
+                  style={{ color: palette.policeBlue }}
+                >
+                  Rankings
+                </h3>
+                <div className="flex items-center gap-2">
+                  <span
+                    className="text-sm"
+                    style={{ color: palette.citrineBrown }}
+                  >
+                    Mostrar:
+                  </span>
+                  <div
+                    className="inline-flex rounded-xl overflow-hidden border"
+                    style={{ borderColor: palette.buff }}
+                  >
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setDogTableMode("absolute")
+                      }
+                      className={`px-3 py-1 text-sm ${
+                        dogTableMode === "absolute"
+                          ? "font-semibold"
+                          : ""
+                      }`}
+                      style={{
+                        background:
+                          dogTableMode === "absolute"
+                            ? palette.buff
+                            : "white",
+                        color: palette.policeBlue,
+                      }}
+                    >
+                      Valores absolutos
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDogTableMode("rate")}
+                      className={`px-3 py-1 text-sm ${
+                        dogTableMode === "rate"
+                          ? "font-semibold"
+                          : ""
+                      }`}
+                      style={{
+                        background:
+                          dogTableMode === "rate"
+                            ? palette.buff
+                            : "white",
+                        color: palette.policeBlue,
+                      }}
+                    >
+                      Valores ponderados
+                    </button>
+                  </div>
+                </div>
+              </div>
+
               {perDogStats.length === 0 ? (
                 <p style={{ color: palette.citrineBrown }}>
-                  No hay suficientes datos para esta gráfica.
+                  No hay sesiones registradas todavía.
                 </p>
               ) : (
-                <div className="h-80">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart
-                      data={perDogStats}
-                      margin={{ top: 10, right: 30, left: 0, bottom: 40 }}
+                <div className="grid md:grid-cols-2 gap-4">
+                  {/* Éxitos */}
+                  <div
+                    className="rounded-2xl p-4 shadow-md"
+                    style={{
+                      background: palette.pearl,
+                      border: `2px solid ${palette.buff}`,
+                    }}
+                  >
+                    <h4
+                      className="font-semibold mb-2"
+                      style={{ color: palette.policeBlue }}
                     >
-                      <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis
-                        dataKey="name"
-                        angle={-20}
-                        textAnchor="end"
-                        height={60}
-                      />
-                      <YAxis />
-                      <Tooltip />
-                      <Legend />
-                      <Bar
-                        dataKey="success"
-                        name="Éxitos"
-                        fill={chartColors.success}
-                      />
-                      <Bar
-                        dataKey="fail"
-                        name="Fallos"
-                        fill={chartColors.fail}
-                      />
-                    </BarChart>
-                  </ResponsiveContainer>
+                      {dogTableMode === "absolute"
+                        ? "Entrenamientos exitosos totales"
+                        : "Tasa de entrenamientos exitosos totales"}
+                    </h4>
+                    <ul className="space-y-1 font-mono text-sm">
+                      {successRanking.map((d, index) => (
+                        <li
+                          key={d.dogId}
+                          className="flex justify-between"
+                        >
+                          <span>
+                            {index + 1}. {d.name}
+                          </span>
+                          <span>
+                            {dogTableMode === "absolute"
+                              ? d.success
+                              : `${d.successRate.toFixed(1)}%`}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                    <div className="mt-3">
+                      <StatsSummary stats={successStatsGlobal} />
+                    </div>
+                  </div>
+
+                  {/* Falsos positivos */}
+                  <div
+                    className="rounded-2xl p-4 shadow-md"
+                    style={{
+                      background: palette.pearl,
+                      border: `2px solid ${palette.buff}`,
+                    }}
+                  >
+                    <h4
+                      className="font-semibold mb-2"
+                      style={{ color: palette.policeBlue }}
+                    >
+                      {dogTableMode === "absolute"
+                        ? "Falsos positivos totales"
+                        : "Tasa de falsos positivos"}
+                    </h4>
+                    <ul className="space-y-1 font-mono text-sm">
+                      {failRanking.map((d, index) => (
+                        <li
+                          key={d.dogId}
+                          className="flex justify-between"
+                        >
+                          <span>
+                            {index + 1}. {d.name}
+                          </span>
+                          <span>
+                            {dogTableMode === "absolute"
+                              ? d.fail
+                              : `${d.failRate.toFixed(1)}%`}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                    <div className="mt-3">
+                      <StatsSummary stats={failStatsGlobal} />
+                    </div>
+                  </div>
                 </div>
               )}
             </section>
 
-            {/* Distribución por olor */}
             <section className="space-y-4">
               <h3
                 className="text-xl font-semibold"
                 style={{ color: palette.policeBlue }}
               >
-                Rendimiento por tipo de olor
+                Rendimiento por sustancia
               </h3>
-              <p style={{ color: palette.citrineBrown }}>
-                Comparación de éxitos y fallos según el tipo de olor
-                entrenado (por ejemplo, narcóticos vs explosivos).
-              </p>
+
               {scentStats.length === 0 ? (
                 <p style={{ color: palette.citrineBrown }}>
                   No hay suficientes datos para esta gráfica.
                 </p>
               ) : (
                 <div className="h-80">
-                  <ResponsiveContainer width="100%" height="100%">
+                  <ResponsiveContainer
+                    width="100%"
+                    height="100%"
+                  >
                     <BarChart
                       data={scentStats}
-                      margin={{ top: 10, right: 30, left: 0, bottom: 40 }}
+                      margin={{
+                        top: 10,
+                        right: 30,
+                        left: 0,
+                        bottom: 40,
+                      }}
                     >
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis
@@ -1522,74 +1682,66 @@ const Stats = () => {
               )}
             </section>
 
-            {/* Efecto de la temperatura */}
             <section className="space-y-4">
               <h3
                 className="text-xl font-semibold"
                 style={{ color: palette.policeBlue }}
               >
-                Tasa de éxito según temperatura
+                Tasa de éxito según condiciones ambientales
               </h3>
-              <p style={{ color: palette.citrineBrown }}>
-                Agrupa las sesiones por rangos de temperatura (según el campo
-                <code> conditions.temp </code>) y muestra la tasa de éxito en
-                cada rango.
-              </p>
-              {tempBuckets.length === 0 ? (
+
+              <div className="flex flex-wrap items-center gap-3">
+                <span
+                  className="font-medium"
+                  style={{ color: palette.policeBlue }}
+                >
+                  Condición:
+                </span>
+                <select
+                  value={selectedCondition}
+                  onChange={(e) =>
+                    setSelectedCondition(e.target.value)
+                  }
+                  className="rounded-xl px-3 py-2 border bg-white"
+                >
+                  {conditionOptions.map((opt) => (
+                    <option key={opt.key} value={opt.key}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {currentConditionSeries.length === 0 ? (
                 <p style={{ color: palette.citrineBrown }}>
-                  No hay datos de temperatura en las sesiones.
+                  No hay datos para esta condición.
                 </p>
               ) : (
                 <div className="h-80">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={tempBuckets}>
+                  <ResponsiveContainer
+                    width="100%"
+                    height="100%"
+                  >
+                    <LineChart data={currentConditionSeries}>
                       <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="bucket" />
+                      <XAxis
+                        dataKey="value"
+                        type="number"
+                        domain={["dataMin", "dataMax"]}
+                        tickFormatter={(v) => v.toFixed(1)}
+                      />
                       <YAxis unit="%" />
-                      <Tooltip />
+                      <Tooltip
+                        formatter={(v) => `${v}%`}
+                        labelFormatter={(v) =>
+                          `Valor: ${v.toFixed(2)}`
+                        }
+                      />
                       <Line
                         type="monotone"
                         dataKey="successRate"
                         name="Tasa de éxito"
                         stroke={palette.policeBlue}
-                        strokeWidth={2}
-                      />
-                    </LineChart>
-                  </ResponsiveContainer>
-                </div>
-              )}
-            </section>
-
-            {/* Efecto de la humedad */}
-            <section className="space-y-4">
-              <h3
-                className="text-xl font-semibold"
-                style={{ color: palette.policeBlue }}
-              >
-                Tasa de éxito según humedad
-              </h3>
-              <p style={{ color: palette.citrineBrown }}>
-                Agrupa las sesiones por rangos de humedad (según{" "}
-                <code>conditions.hum</code>) y muestra la tasa de éxito en cada
-                rango.
-              </p>
-              {humBuckets.length === 0 ? (
-                <p style={{ color: palette.citrineBrown }}>
-                  No hay datos de humedad en las sesiones.
-                </p>
-              ) : (
-                <div className="h-80">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={humBuckets}>
-                      <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="bucket" />
-                      <YAxis unit="%" />
-                      <Tooltip />
-                      <Line
-                        type="monotone"
-                        dataKey="successRate"
-                        name="Tasa de éxito"
-                        stroke={palette.citrineBrown}
                         strokeWidth={2}
                       />
                     </LineChart>
@@ -1604,7 +1756,6 @@ const Stats = () => {
   );
 };
 
-// Tarjetita simple para los KPIs
 const KpiCard = ({ label, value }) => (
   <div
     className="rounded-2xl p-4 shadow-md"
